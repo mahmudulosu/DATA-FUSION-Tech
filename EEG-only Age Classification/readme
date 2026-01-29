@@ -1,0 +1,75 @@
+# EEG-only Age Classification (Young vs Old) — ConvNeXt-Tiny + Electrode-Aware Attention
+
+This script trains and evaluates an **EEG-only binary age classifier** using **17-channel scalogram images**. It converts categorical age bins into **Young (20–30)** vs **Old (60–75)** and trains a lightweight deep model with **subject-wise splitting**, class balancing, and paper-style evaluation artifacts.
+
+---
+
+## Task
+**Binary classification (Young vs Old)** from EEG scalograms:
+
+- **Young (label 0):** `20-25`, `25-30`  
+- **Old (label 1):** `60-65`, `65-70`, `70-75`
+
+Labels are read from a CSV containing:
+- `participant_id`
+- `age` ∈ {`20-25`,`25-30`,`60-65`,`65-70`,`70-75`}
+
+EEG files are `.npy` scalograms shaped `(224, 224, 17)` and must be named such that the **participant_id is the prefix before the first underscore**.
+
+---
+
+## Model
+- **Backbone:** ConvNeXt-Tiny pretrained on ImageNet-1K  
+  - Stem adapted from **3 → 17 channels** using mean-weight initialization.
+- **Electrode-Aware Attention (EAA):** channel attention over the 17 electrodes.
+- **Embedding:** 512-D normalized feature vector.
+- **Classifier head:** small MLP → 2 logits (young/old).
+
+---
+
+## Training setup
+- **Loss:** Cross-Entropy
+- **Optimizer:** AdamW
+- **Scheduler:** CosineAnnealingLR
+- **Mixed precision:** enabled on CUDA
+- **Class imbalance handling:** `WeightedRandomSampler`
+- **Augmentation:** light SpecAug-style rectangular masking on scalograms (train only)
+
+---
+
+## Evaluation
+- Uses a **stratified subject split** into train/test (default test fraction = 20%).
+- Optional **light test-time augmentation (TTA)** via flips on time/frequency axes.
+- Reports:
+  - Confusion matrix + classification report
+  - Accuracy + Macro-F1
+  - **AUROC**, **AUPRC**
+  - **ECE (Expected Calibration Error)** for probability calibration
+  - t-SNE visualization of test embeddings
+
+---
+
+## Outputs
+All artifacts are written to `./age_eeg/`:
+
+- `history_metrics.csv` — per-epoch train/val loss & accuracy  
+- `curves_train_val_loss.png` / `curves_train_val_acc.png` — learning curves  
+- `test_predictions.csv` — per-subject predictions + probabilities  
+- `confusion_matrix.png` — confusion heatmap  
+- `roc_curve.png` — ROC curves (class-wise + micro)  
+- `tsne_test_embeddings.png` — t-SNE of 512-D test embeddings  
+- `paper_metrics.csv` — compact table for paper reporting  
+- `metrics_glossary.txt` — definitions of reported metrics
+
+Checkpoint saved to:
+- `./checkpoints/eeg_age_convnext.pth`
+
+---
+
+## How to run
+1. Edit paths at the top:
+   - `EEG_DIR` (folder of `.npy` scalograms)
+   - `CSV` (participant metadata with `participant_id` and `age`)
+2. Run:
+```bash
+python eeg_age_convnext.py
