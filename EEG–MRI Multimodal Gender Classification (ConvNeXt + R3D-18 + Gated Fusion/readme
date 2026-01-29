@@ -1,0 +1,206 @@
+# EEG–MRI Multimodal Gender Classification (ConvNeXt + R3D-18 + Gated Fusion)
+
+This project implements a **multimodal deep learning pipeline** to classify **gender (Male vs Female)** using:
+
+- **EEG scalograms** (precomputed time–frequency images stored as `.npy`)
+- **Structural MRI volumes** (`.nii` / `.nii.gz`)
+
+The model uses **two modality-specific encoders** and a **gated fusion head**, trained with a combination of:
+- **cross-entropy classification loss**
+- **cosine alignment loss** to encourage EEG and MRI embeddings to be consistent
+
+---
+
+## Task
+
+**Binary classification**:
+- `0 = Male (M)`
+- `1 = Female (F)`
+
+Labels are read from a metadata CSV file.
+
+---
+
+## Data format
+
+### EEG input
+- Directory: `EEG_DIR`
+- Each file: `*.npy`
+- Shape: **(224, 224, 17)**  
+  - `224×224` scalogram image
+  - `17` EEG channels (electrodes)
+- Participant ID is extracted from filename prefix:
+  - `pid = filename.split('_')[0]`
+
+### MRI input
+- Directory: `MRI_DIR`
+- Each file: `*.nii` or `*.nii.gz`
+- Participant ID is extracted in the same way:
+  - `pid = filename.split('_')[0]`
+
+### Labels (CSV)
+- File: `participants_LSD_andLEMON.csv`
+- Required columns:
+  - `participant_id`
+  - `gender` (M/F)
+
+---
+
+## Preprocessing & augmentation
+
+### EEG preprocessing
+1. Load `.npy` scalogram
+2. Per-channel **z-score normalization**
+3. Training augmentation (**SpecAugment-like**):
+   - Random time masking
+   - Random frequency masking
+
+### MRI preprocessing
+1. Load NIfTI volume
+2. Robust intensity normalization using percentile range:
+   - normalize using 1st–99th percentiles
+3. Resample to a fixed spatial size using `scipy.ndimage.zoom`
+4. Extract a centered depth slab:
+   - output tensor shape becomes `[T, H, W]`
+5. Training augmentation:
+   - Random flips across axes
+   - Small random rotations
+
+Final MRI tensor is formatted for video models:
+- **R3D-18 input**: `[C=3, T=depth, H, W]`  
+  MRI is replicated into 3 channels.
+
+---
+
+## Datasets
+
+### `EEGDataset`
+- Loads `.npy` scalograms
+- Returns: EEG tensor `[17, 224, 224]`, label, participant ID
+
+### `MRIDataset`
+- Loads MRI volumes, normalizes, resizes, augments
+- Returns: MRI tensor `[3, T, H, W]`, label, participant ID
+
+### `FusionDataset`
+- Matches subjects that exist in **both modalities**
+- Returns: `(EEG, MRI, label, pid)` for overlapping participants only
+
+---
+
+## Train/test split (subject-wise, controlled ratio)
+
+A custom split function creates a **subject-wise test set** with an approximate ratio:
+
+**Male : Female = 2 : 1**
+
+This is enforced **only using participants present in both modalities**.
+
+The split prints:
+- counts in train/test
+- M:F ratio in test set
+
+---
+
+## Model architecture
+
+### EEG encoder: ConvNeXt-Tiny
+- Pretrained ImageNet backbone: `convnext_tiny`
+- Modified input stem:
+  - from `3` channels → `17` channels
+  - weights initialized by averaging ImageNet RGB filters
+- Global average pooling + projection head
+- Output: **512-d normalized embedding**
+
+### MRI encoder: R3D-18 (3D ResNet)
+- Pretrained backbone: `torchvision.models.video.r3d_18`
+- Classification head replaced with identity
+- Projection head → **512-d normalized embedding**
+
+### Fusion head: Gated Fusion
+The fusion head learns a **soft gate** `g ∈ [0,1]` to combine EEG and MRI:
+
+- `fused_vec = g * EEG + (1 - g) * MRI`
+
+Then concatenates:
+- `[fused_vec, EEG, MRI]` → classification MLP → logits
+
+Outputs:
+- `logits` (2 classes)
+- `g` (gate value per sample)
+
+---
+
+## Loss function
+
+Total loss per batch:
+- **Cross-Entropy Loss** for classification
+- **Cosine Alignment Loss** between EEG and MRI embeddings:
+
+\[
+\mathcal{L} = \mathcal{L}_{CE} + \lambda \cdot (1 - \cos(e, m))
+\]
+
+Where:
+- `e` = EEG embedding
+- `m` = MRI embedding
+- `λ = lambda_align` (default `0.15`)
+
+---
+
+## Training strategy
+
+Training runs in **two stages**:
+
+### Stage A (default 15 epochs)
+- Train fusion head + projection heads
+- Unfreeze only higher-level backbone blocks:
+  - EEG: ConvNeXt stages (3,4)
+  - MRI: `layer4`
+
+### Stage B (default 10 epochs)
+- Unfreeze one more block for each modality:
+  - EEG: stages (2,3,4)
+  - MRI: `layer3` + `layer4`
+
+Optimization:
+- `AdamW` with weight decay
+- cosine LR scheduling
+- mixed precision training (CUDA)
+- gradient clipping on fusion head
+
+---
+
+## Evaluation
+
+During evaluation the code prints:
+- Accuracy
+- Confusion matrix (always 2×2 using fixed labels `[0,1]`)
+- `classification_report` (precision/recall/F1)
+
+Target names:
+- `0 = M`
+- `1 = F`
+
+---
+
+## Output
+
+After training, the model weights are saved to:
+
+`fusion_convnext_r3d18_gated_align.pth`
+
+Includes:
+- `eeg_enc` state_dict
+- `mri_enc` state_dict
+- `fusion head` state_dict
+
+---
+
+## How to run
+
+1. Edit paths inside the script:
+```python
+EEG_DIR = r"..."
+MRI_DIR = r"..."
+CSV     = r"..."
