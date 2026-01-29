@@ -1,0 +1,146 @@
+# Loss Ablation Study — EEG + sMRI Fusion Gender Classification (GEA-MVA + CMCR)
+
+This script runs a **loss-function ablation** for a multimodal **EEG (17-channel scalograms) + structural MRI (3D)** fusion model for **binary gender classification**.
+
+It compares four training configurations while keeping **the same subject-wise split** and the same model architecture (GEA-MVA fusion with gated head), so the only change across runs is the **loss composition**.
+
+---
+
+## What this ablation tests
+
+Each experiment trains the same fusion pipeline under one of the following loss settings:
+
+1. **CE only**  
+   - Standard cross-entropy classification loss
+
+2. **CE + Alignment**  
+   - Cross-entropy + **cosine alignment loss** between EEG and MRI embeddings
+
+3. **CE + Contrast**  
+   - Cross-entropy + **cross-modal contrastive (InfoNCE) loss** between EEG and MRI embeddings
+
+4. **CE + Alignment + Contrast (Baseline)**  
+   - Cross-entropy + alignment + contrastive loss (full method)
+
+This isolates how much each auxiliary objective contributes to performance.
+
+---
+
+## Outputs / Artifacts
+
+For each run, artifacts are saved under:
+
+`outputss/loss_ablation/<TAG>/`
+
+Where `<TAG>` is one of:
+- `ce_only`
+- `ce_plus_align`
+- `ce_plus_contrast`
+- `all_losses`
+
+Each run folder contains:
+
+- `run_config.csv`  
+  Hyperparameters and loss settings used for that run.
+
+- `history_metrics.csv`  
+  Epoch-wise training/validation curves (loss + accuracy).
+
+- `curves_train_val_acc.png`  
+  Train vs validation accuracy over epochs.
+
+- `curves_train_val_loss.png`  
+  Train vs validation loss over epochs.
+
+- `test_predictions.csv`  
+  Per-subject test outputs including:
+  - `pid`, `y_true`, `y_pred`
+  - class probabilities (`prob_M`, `prob_F`)
+  - fusion gate value (`gate`)
+
+- `confusion_matrix.png`  
+  Confusion matrix on test set (TTA evaluation).
+
+- `roc_curve.png`  
+  ROC curves (per-class + micro-average).
+
+- `tsne_fused_test.png`  
+  t-SNE visualization of the **fused embeddings** on the test set.
+
+- `fusion_GEA_MVA_CMCR.pth`  
+  Final checkpoint containing encoder + fusion head weights and run config.
+
+A summary across the four runs is saved to:
+
+`outputss/loss_ablation/summary.csv`
+
+---
+
+## Data format
+
+### EEG
+- Directory: `EEG_DIR`
+- Files: `.npy` with shape **(224, 224, 17)**
+- Preprocessing:
+  - per-channel z-score normalization
+- Train augmentation:
+  - SpecAugment-like time/frequency masking
+
+### MRI
+- Directory: `MRI_DIR`
+- Files: `.nii` / `.nii.gz`
+- Preprocessing:
+  - percentile normalization (1st–99th)
+  - resample to **160³**
+- Multi-Volume Aggregation (MVA):
+  - sample **K = 3** center-biased crops of size **128³**
+- Train augmentation:
+  - random flips + small rotations
+
+Labels come from `CSV` (`participant_id`, `gender`) with mapping:
+- `0 = Male (M)`
+- `1 = Female (F)`
+
+Participant IDs are parsed from filenames using:
+`pid = filename.split('_')[0]`
+
+---
+
+## Model overview (constant across all runs)
+
+- **EEG encoder:** ConvNeXt-Tiny (ImageNet pretrained) adapted to 17 channels  
+  + Electrode Attention (channel attention over electrodes)
+
+- **MRI encoder:** R3D-18 (pretrained)  
+  + attention pooling across K MRI crops (MVA)
+
+- **Fusion head:** gated fusion
+  - learns a per-sample gate `g ∈ [0,1]`
+  - combines embeddings: `g·EEG + (1−g)·MRI`
+  - classifier uses `[fused, EEG, MRI]`
+
+---
+
+## Evaluation protocol used here
+
+- Uses a **fixed subject-wise split** (same across all runs)
+- Test set is evaluated using **TTA (test-time augmentation)**:
+  - EEG flips (H/W)
+  - MRI crop-stack flip (depth axis)
+- The script reports:
+  - accuracy
+  - classification report (precision/recall/F1 per class)
+  - confusion matrix
+  - micro-average AUC
+
+> Note: in this ablation script, the “val/test” printout during training is computed using the test loader (named as validation in logs). The split is still fixed and consistent across runs, but if you want strict protocol, replace that with a true held-out validation set (like your multi-seed script).
+
+---
+
+## How to run
+
+1) Edit paths at the top of the script:
+```python
+EEG_DIR = r"..."
+MRI_DIR = r"..."
+CSV     = r"..."
