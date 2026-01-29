@@ -1,0 +1,128 @@
+# GEA-MVA + ViT-B/16 (EEG) — EEG + sMRI Fusion for Gender Classification
+
+This script trains and evaluates a **multimodal fusion model** for **binary gender classification** using:
+
+- **EEG**: 17-channel **scalogram images** (`224×224×17`)  
+- **sMRI**: 3D structural MRI volumes (`.nii/.nii.gz`) processed into **K=3 center-biased 128³ crops**  
+- **Fusion**: a **gated fusion head** that learns how much to trust EEG vs MRI per subject  
+- **Training losses**:  
+  **Cross-Entropy** + **cosine alignment** between modalities + **cross-modal contrastive (InfoNCE)**
+
+Outputs are written to `output_pretrained/` (figures + CSVs) and model weights to `checkpoints/`.
+
+---
+
+## Key ideas
+
+### 1) EEG encoder = ViT-B/16 (ImageNet-1K pretrained)
+- Uses `vit_b_16` pretrained on ImageNet-1K
+- Adapts the ViT patch embedding from **3 → 17 channels** using **mean-weight initialization**
+- Produces a **768-D CLS embedding**, projected to **512-D**, then L2-normalized
+- By default, most of the ViT is frozen and only the **tail blocks + layer norms + projection head** are trainable (configurable via `freeze_until` / unfreeze list in Stage B)
+
+### 2) MRI encoder = R3D-18 + Multi-Volume Aggregation (MVA)
+- Each MRI is normalized (1–99 percentile) and resampled to **160³**
+- For each subject, the loader produces **K=3** crops of size **128³** (center-biased jitter in train; deterministic center crop in eval)
+- Each crop is encoded with **r3d_18 (pretrained)** → projected to **512-D**
+- **Attention pooling across crops** learns which crop is most informative
+
+### 3) Fusion = Gated Fusion Head
+Given EEG embedding `e` and MRI embedding `m`:
+- A small gating network predicts `g ∈ [0,1]`
+- Fused vector: `f = g·e + (1−g)·m`
+- Classifier operates on `[f, e, m]` (concatenation), producing logits for {Male, Female}
+- Gate values are saved for interpretability (“how much the model relied on EEG vs MRI”)
+
+---
+
+## Training objective
+
+Total loss per batch:
+- **CE**: standard classification loss  
+- **Alignment**: encourages EEG/MRI embeddings to match  
+  `L_align = 1 − cosine(e, m)`
+- **Contrastive (InfoNCE)**: cross-modal matching within the batch  
+  `L_ctr = InfoNCE(e ↔ m, temperature τ)`
+
+Final:
+`L = CE + λ_align · L_align + λ_ctr · L_ctr`
+
+Contrastive weight changes by stage:
+- Stage A: `λ_ctr = LAMBDA_CONTR_A` (warm-up)
+- Stage B: `λ_ctr = LAMBDA_CONTR_B` (stronger finetune)
+
+---
+
+## Two-stage finetuning schedule
+
+### Stage A (warm-up)
+- Small contrastive weight
+- ViT remains mostly frozen (train tail only)
+- MRI trains top blocks (`layer4` default)
+
+### Stage B (finetune)
+- Higher contrastive weight
+- Deeper unfreeze:
+  - ViT: unfreezes late transformer blocks (8–11 by default)
+  - MRI: unfreezes `layer3` + `layer4`
+
+---
+
+## Evaluation (with light TTA)
+
+Evaluation is performed twice:
+- Standard inference
+- **Light TTA** (averaging logits across a few simple transforms):
+  - EEG flips along spatial axes
+  - MRI crop stack flip along depth axis
+
+The script saves:
+- predictions, probabilities, and gate values per subject
+- confusion matrix and ROC curves
+- t-SNE of fused embeddings (test set)
+
+---
+
+## Outputs
+
+All results go to:
+
+### `output_pretrained/`
+- `history_metrics.csv` — epoch-level train/val loss + accuracy
+- `curves_train_val_acc.png` / `curves_train_val_loss.png`
+- `test_predictions.csv` — `pid`, `y_true`, `y_pred`, `prob_M`, `prob_F`, `gate`
+- `confusion_matrix.png`
+- `roc_curve.png`
+- `tsne_fused_test.png`
+
+### `checkpoints/`
+- `fusion_GEA_MVA_CMCR_ViT.pth` — encoder + head weights and config
+
+---
+
+## Data requirements
+
+### EEG
+- Directory: `EEG_DIR`
+- Files: `.npy` shaped **(224, 224, 17)**
+- Filename must begin with subject ID: `participantID_...npy`
+
+### MRI
+- Directory: `MRI_DIR`
+- Files: `.nii` or `.nii.gz`
+- Filename must begin with subject ID: `participantID_...nii.gz`
+
+### Labels
+- CSV: `CSV`
+- Must include columns: `participant_id`, `gender`
+- Gender mapping: `M → 0`, `F → 1`
+
+---
+
+## How to run
+
+1) Edit paths at the top:
+```python
+EEG_DIR = r"..."
+MRI_DIR = r"..."
+CSV     = r"..."
