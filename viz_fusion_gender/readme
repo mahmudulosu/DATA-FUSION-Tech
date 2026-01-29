@@ -1,0 +1,94 @@
+# viz_fusion_gender.py — TEST-Only Visualization for EEG+sMRI Fusion Gender Model
+
+This script generates **post-hoc visualizations** for a trained **EEG + structural MRI (sMRI) fusion classifier**, using **TEST subjects only** to avoid data leakage. It is designed to complement the training pipeline by providing **embedding-level separation plots** and **modality-specific attribution maps**.
+
+---
+
+## What it does
+
+### 1) Embedding visualization (Fused branch)
+Using the **fused 512-D embeddings** (output of the fusion head before classification), the script produces:
+
+- **t-SNE (clean pipeline)**  
+  PCA pre-reduction + safe perplexity selection + 2D t-SNE scatter by class.
+  - Output: `tsne_fused_test_clean.png`
+
+- **LDA projection (2-class)**  
+  1D Linear Discriminant Analysis axis plotted in 2D (second axis is zero).
+  - Output: `lda_fused_test.png`
+
+It also prints **confusion matrix + classification report** on the same test subjects for reference.
+
+---
+
+### 2) MRI interpretability: 3D Grad-CAM (per subject + group mean)
+For each TEST subject:
+
+- MRI is loaded, robust-normalized (1–99 percentile), resampled to **160³**
+- A deterministic **center 128³ crop** is created and replicated **K=3** times (to match the training-time MVA format)
+- For each crop, **3D Grad-CAM** is computed from **`r3d_18.layer4`**, using gradients of the predicted class logit
+- Crop CAMs are aggregated using the model’s **attention weights over crops**
+- The final subject CAM is overlaid on 3 orthogonal slices (sagittal/coronal/axial)
+
+Per-subject outputs:
+- `camMRI_<PID>_panels.png` — MRI slice overlays (volume + CAM heatmap)
+
+Group outputs (averaged by TRUE label):
+- `group_CAM_MRI_M.nii.gz`, `group_CAM_MRI_F.nii.gz` — group mean CAM volumes in 160³ space
+- `group_CAM_MRI_M_panels.png`, `group_CAM_MRI_F_panels.png` — slice overlays for group maps
+
+> Note: group NIfTIs are saved with an identity affine (`np.eye(4)`), so they are intended for **relative visualization** in the resampled 160³ space, not direct alignment to native/MNI space.
+
+---
+
+### 3) EEG interpretability: input-gradient saliency (per subject + group mean)
+For each TEST subject:
+
+- Computes **input-gradient saliency** on the EEG branch:
+  - gradient of predicted class logit w.r.t. the EEG input
+  - averages absolute gradient across the 17 channels → a single **224×224 saliency map**
+- Saves a per-subject saliency heatmap and accumulates class-wise averages
+
+Per-subject outputs:
+- `salEEG_<PID>.png`
+
+Group outputs:
+- `group_SALIENCY_EEG_M.png`, `group_SALIENCY_EEG_F.png`
+
+---
+
+## Leakage prevention (important)
+- The script **rebuilds the test split** using the same subject-level split logic used during training (**M:F ≈ 2:1**) and **only loads/test-runs those subjects**.
+- No training subjects are used for any visualization.
+
+---
+
+## Requirements / Inputs
+
+Edit the following paths at the top of the script:
+
+- `EEG_DIR`: folder of `.npy` scalograms shaped `(224,224,17)`
+- `MRI_DIR`: folder of `.nii/.nii.gz` structural scans
+- `CSV`: participant table with columns `participant_id`, `gender` (M/F)
+- `CKPT`: trained fusion checkpoint (expects keys: `eeg_enc`, `mri_enc`, `head`)
+- `OUT_DIR`: output folder for all visualization artifacts
+
+Filename convention:
+- subject ID must be the token **before the first underscore** (e.g., `sub001_task.npy`, `sub001_T1w.nii.gz`)
+
+---
+
+## Outputs (saved under `OUT_DIR/`)
+- `tsne_fused_test_clean.png`
+- `lda_fused_test.png`
+- `camMRI_<PID>_panels.png` (per subject)
+- `salEEG_<PID>.png` (per subject)
+- `group_CAM_MRI_M.nii.gz`, `group_CAM_MRI_F.nii.gz`
+- `group_CAM_MRI_M_panels.png`, `group_CAM_MRI_F_panels.png`
+- `group_SALIENCY_EEG_M.png`, `group_SALIENCY_EEG_F.png`
+
+---
+
+## How to run
+```bash
+python viz_fusion_gender.py
